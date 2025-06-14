@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Záznam o škodní události</title>
+  <!-- React, Tailwind, html2pdf, Signature Pad -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/signature_pad@4.0.0/dist/signature_pad.umd.min.js"></script>
+  <style>
+    @page { size: A4 portrait; margin: 10mm; }
+    @media print {
+      .print-hidden { display: none !important; }
+      .avoid-break { break-inside: avoid; page-break-inside: avoid; }
+    }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <div id="root"></div>
+  <script type="text/babel" data-presets="env,react">
+    const { useState, useEffect, useMemo, useRef, forwardRef } = React;
+    const GRID_TMPL = 'md:[grid-template-columns:2fr_3fr_1fr_1fr_1fr_auto]';
+    const OPTIONS = ['Regál stojina','Regál nosník','Regál police','VZV','Elektroinstalace','Zeď','Vrata','Dopravník','Klec','Zboží','Ostatní'];
+    const fmtMoney = (v,c) => new Intl.NumberFormat('cs-CZ',{style:'currency',currency:c}).format(v);
+
+    const Card = ({ children }) => <div className="bg-white rounded-2xl shadow p-6 space-y-4 avoid-break">{children}</div>;
+    const Title = ({ n, t }) => <h2 className="text-2xl font-semibold mb-4 border-b pb-2">{n}. {t}</h2>;
+    const Input = forwardRef(({ label, error, ...props }, ref) => (
+      <div>
+        {label && <label className="block text-sm font-medium mb-1 text-gray-800">{label}</label>}
+        <input ref={ref} {...props} className={`border p-2 rounded w-full h-10 ${error ? 'border-red-500' : 'border-gray-300'}`} />
+        {error && <p className="text-red-500 text-xs mt-1">{error}</p>}
+      </div>
+    ));
+    const TextArea = forwardRef(({ label, error, ...props }, ref) => (
+      <div>
+        {label && <label className="block text-sm font-medium mb-1 text-gray-800">{label}</label>}
+        <textarea ref={ref} {...props} className={`border p-2 rounded w-full min-h-24 ${error ? 'border-red-500' : 'border-gray-300'}`}></textarea>
+        {error && <p className="text-red-500 text-xs mt-1">{error}</p>}
+      </div>
+    ));
+
+    function VinikForm({ vinik, setVinik, errors }) {
+      const handle = f => e => setVinik(v => ({ ...v, [f]: e.target.value }));
+      return (
+        <Card>
+          <Title n={1} t="Viník" />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Input 
+              label="Jméno a příjmení *" 
+              value={vinik.jmeno} 
+              onChange={handle('jmeno')} 
+              error={errors.jmeno}
+              required 
+            />
+            <Input label="Firma" value={vinik.firma} onChange={handle('firma')} />
+            <Input label="IČO / RČ / Osobní číslo" value={vinik.identifikace} onChange={handle('identifikace')} />
+            <Input label="Telefon / E-mail" value={vinik.kontakt} onChange={handle('kontakt')} className="md:col-span-2" />
+          </div>
+        </Card>
+      );
+    }
+
+    function UdalostForm({ udalost, setUdalost, errors }) {
+      const handleGroup = (g,f) => e => setUdalost(u => ({ ...u, [g]: { ...u[g], [f]: e.target.value } }));
+      const handleField = f => e => setUdalost(u => ({ ...u, [f]: e.target.value }));
+      
+      return (
+        <Card>
+          <Title n={2} t="Událost" />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Input 
+              type="date" 
+              label="Datum události *" 
+              value={udalost.kdy?.datum || ''} 
+              onChange={handleGroup('kdy','datum')} 
+              error={errors.datum}
+              required 
+            />
+            <Input 
+              type="time" 
+              label="Čas události" 
+              value={udalost.kdy?.cas || ''} 
+              onChange={handleGroup('kdy','cas')} 
+            />
+          </div>
+          <div className="mt-4 space-y-2">
+            <Input 
+              label="Formulář sepsán (datum)" 
+              value={udalost.formular?.datum || ''} 
+              readOnly 
+              className="bg-gray-100" 
+            />
+            <Input 
+              label="Formulář sepsán (čas)" 
+              value={udalost.formular?.cas || ''} 
+              readOnly 
+              className="bg-gray-100" 
+            />
+          </div>
+          <div className="mt-4">
+            <label className="block text-sm font-medium mb-1 text-gray-800">Kde došlo k události *</label>
+            <select 
+              value={udalost.misto || ''} 
+              onChange={handleField('misto')} 
+              className={`border p-2 rounded w-full h-10 ${errors.misto ? 'border-red-500' : 'border-gray-300'}`}
+            >
+              <option value="">-- Vyberte --</option>
+              <option>Trnkova 3118/119C, 628 00 Brno</option>
+              <option>Masná 27/9, 602 00 Brno</option>
+            </select>
+            {errors.misto && <p className="text-red-500 text-xs mt-1">{errors.misto}</p>}
+          </div>
+        </Card>
+      );
+    }
+
+    function ItemsTable({ items, setItems, errors }) {
+      const handleItem = (i,f) => e => {
+        const value = e.target.value;
+        setItems(it => it.map((r,idx) => {
+          if (idx === i) {
+            const updatedItem = { ...r, [f]: value };
+            if (f === 'mnozstvi' || f === 'odhad') {
+              const mnozstvi = f === 'mnozstvi' ? Number(value) || 0 : Number(r.mnozstvi) || 0;
+              const cena = f === 'odhad' ? Number(value) || 0 : Number(r.odhad) || 0;
+              updatedItem.celkem = mnozstvi * cena;
+            }
+            return updatedItem;
+          }
+          return r;
+        }));
+      };
+      
+      const add = () => setItems(it => [...it, { typ:'', popis:'', mnozstvi:'', odhad:'', mena:'CZK', celkem: 0 }]);
+      const del = i => setItems(it => it.filter((_,idx)=>idx!==i));
+      
+      const totals = useMemo(() => {
+        return items.reduce((acc, item) => {
+          const mnozstvi = Number(item.mnozstvi) || 0;
+          const cena = Number(item.odhad) || 0;
+          const celkem = mnozstvi * cena;
+          acc[item.mena] = (acc[item.mena] || 0) + celkem;
+          return acc;
+        }, {});
+      }, [items]);
+
+      return (
+        <Card>
+          <Title n={3} t="Poškozené věci" />
+          {errors.items && <p className="text-red-500 text-sm mb-2">{errors.items}</p>}
+          <div className={`hidden md:grid ${GRID_TMPL} gap-2 text-xs text-gray-600 bg-gray-100 p-2 rounded`}>
+            <span>Typ *</span><span>Popis</span><span className="text-center">Množství</span><span className="text-center">Cena/ks</span><span className="text-center">Měna</span><span></span>
+          </div>
+          <div className="space-y-4 mt-2">
+            {items.map((it,i)=>(
+              <div key={i} className={`grid grid-cols-1 ${GRID_TMPL} gap-2 p-2 bg-gray-50 rounded`}>
+                <select 
+                  value={it.typ || ''} 
+                  onChange={handleItem(i,'typ')} 
+                  className="border p-2 rounded h-10" 
+                  required
+                >
+                  <option value="">-- Typ --</option>
+                  {OPTIONS.map(o=><option key={o} value={o}>{o}</option>)}
+                </select>
+                <textarea 
+                  placeholder="Detail…" 
+                  value={it.popis || ''} 
+                  onChange={handleItem(i,'popis')} 
+                  className="border p-2 rounded w-full min-h-24" 
+                />
+                <input 
+                  type="number" 
+                  min="0"
+                  step="0.01"
+                  placeholder="Množství" 
+                  value={it.mnozstvi || ''} 
+                  onChange={handleItem(i,'mnozstvi')} 
+                  className="border p-2 rounded w-full h-10" 
+                />
+                <input 
+                  type="number" 
+                  min="0"
+                  step="0.01"
+                  placeholder="Cena/ks" 
+                  value={it.odhad || ''} 
+                  onChange={handleItem(i,'odhad')} 
+                  className="border p-2 rounded w-full h-10" 
+                />
+                <select 
+                  value={it.mena || 'CZK'} 
+                  onChange={handleItem(i,'mena')} 
+                  className="border p-2 rounded h-10"
+                >
+                  <option value="CZK">CZK</option>
+                  <option value="EUR">EUR</option>
+                </select>
+                <button 
+                  onClick={()=>del(i)} 
+                  className="bg-red-500 text-white rounded w-8 h-8 hover:bg-red-600"
+                  title="Smazat položku"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+          <div className="flex justify-between items-center mt-4">
+            <button 
+              onClick={add} 
+              className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+            >
+              + Přidat položku
+            </button>
+            <div className="text-right font-semibold">
+              <div className="text-sm text-gray-600 mb-1">Celková škoda:</div>
+              {Object.entries(totals).map(([currency, sum]) => (
+                <div key={currency} className="text-lg">
+                  {fmtMoney(sum, currency)}
+                </div>
+              ))}
+            </div>
+          </div>
+        </Card>
+      );
+    }
+
+    function DescriptionSection({ udalost, setUdalost, errors }) {
+      const handle = f => e => setUdalost(u => ({ ...u, [f]: e.target.value }));
+      return (
+        <Card>
+          <Title n={4} t="Popis události" />
+          <TextArea 
+            value={udalost.popis || ''} 
+            onChange={handle('popis')} 
+            placeholder="Detailní popis toho, co se stalo..."
+            error={errors.popis}
+          />
+          <Title n={5} t="Příčina události" />
+          <TextArea 
+            value={udalost.pricina || ''} 
+            onChange={handle('pricina')}
+            placeholder="Co bylo příčinou události? Lidská chyba, technická závada, vnější faktory..."
+          />
+        </Card>
+      );
+    }
+
+    function PhotoSection({ photos, setPhotos }) {
+      const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+      const MAX_PHOTOS = 10;
+
+      const add = e => {
+        const files = Array.from(e.target.files);
+        
+        if (photos.length + files.length > MAX_PHOTOS) {
+          alert(`Můžete nahrát maximálně ${MAX_PHOTOS} fotografií.`);
+          return;
+        }
+
+        const oversizedFiles = files.filter(f => f.size > MAX_FILE_SIZE);
+        if (oversizedFiles.length > 0) {
+          alert('Některé soubory jsou příliš velké. Maximální velikost je 5MB.');
+          return;
+        }
+
+        const newPhotos = files.map(f => ({ 
+          url: URL.createObjectURL(f),
+          file: f,
+          name: f.name
+        }));
+        setPhotos(ps => [...ps, ...newPhotos]);
+        
+        e.target.value = '';
+      };
+      
+      const del = i => {
+        setPhotos(ps => {
+          if (ps[i] && ps[i].url) {
+            URL.revokeObjectURL(ps[i].url);
+          }
+          return ps.filter((_,idx)=>idx!==i);
+        });
+      };
+
+      return (
+        <Card>
+          <Title n={6} t="Fotodokumentace" />
+          <div className="mb-4">
+            <input 
+              type="file" 
+              multiple 
+              accept="image/*" 
+              onChange={add} 
+              className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" 
+            />
+            <p className="text-xs text-gray-500 mt-1">
+              Maximálně {MAX_PHOTOS} fotek, každá do 5MB. Podporované formáty: JPG, PNG, GIF
+            </p>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {photos.map((p,i)=>(
+              <div key={i} className="relative group">
+                <img 
+                  src={p.url} 
+                  alt={`Foto ${i+1}`} 
+                  className="w-full h-40 object-cover rounded border"
+                />
+                <button 
+                  onClick={()=>del(i)} 
+                  className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 text-sm hover:bg-red-600 opacity-80 group-hover:opacity-100"
+                  title="Smazat fotografii"
+                >
+                  ×
+                </button>
+                <div className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white text-xs p-1 rounded-b truncate">
+                  {p.name || `Foto ${i+1}`}
+                </div>
+              </div>
+            ))}
+          </div>
+          {photos.length === 0 && (
+            <div className="text-center py-8 text-gray-500">
+              <p>Žádné fotografie nebyly nahrány</p>
+            </div>
+          )}
+        </Card>
+      );
+    }
+
+    function SignaturesSection({ signatures, setSignatures }) {
+      const canvasRefs = useRef({});
+      const signaturePads = useRef({});
+
+      useEffect(() => {
+        ['vinik', 'security'].forEach(role => {
+          if (canvasRefs.current[role] && !signaturePads.current[role]) {
+            signaturePads.current[role] = new SignaturePad(canvasRefs.current[role], {
+              backgroundColor: 'rgba(255, 255, 255, 0)',
+              penColor: 'rgb(0, 0, 0)',
+              minWidth: 1,
+              maxWidth: 2
+            });
+            
+            signaturePads.current[role].addEventListener('endStroke', () => {
+              const dataURL = signaturePads.current[role].toDataURL();
+              setSignatures(prev => ({ ...prev, [role]: dataURL }));
+            });
+          }
+        });
+
+        return () => {
+          Object.values(signaturePads.current).forEach(pad => {
+            if (pad && pad.off) {
+              pad.off();
+            }
+          });
+        };
+      }, [setSignatures]);
+
+      const clearSignature = (role) => {
+        if (signaturePads.current[role]) {
+          signaturePads.current[role].clear();
+          setSignatures(prev => ({ ...prev, [role]: null }));
+        }
+      };
+
+      return (
+        <Card>
+          <Title n={7} t="Podpisy" />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {[
+              {key: 'vinik', label: 'Viník'}, 
+              {key: 'security', label: 'Security'}
+            ].map(({key, label}) => (
+              <div key={key}>
+                <div className="flex justify-between items-center mb-2">
+                  <p className="font-semibold">Podpis {label}</p>
+                  <button 
+                    onClick={() => clearSignature(key)} 
+                    className="text-sm bg-gray-200 px-2 py-1 rounded hover:bg-gray-300"
+                  >
+                    Vymazat
+                  </button>
+                </div>
+                <canvas 
+                  ref={el => canvasRefs.current[key] = el}
+                  width="300"
+                  height="160"
+                  className="border w-full h-40 bg-white rounded cursor-crosshair" 
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Podepište se myší nebo prstem na dotykové obrazovce
+                </p>
+              </div>
+            ))}
+          </div>
+        </Card>
+      );
+    }
+
+    function ExportSection({ draftRef, onFileLoad, savePdf, sendMail, saveDraft, loadDraft, isValid, validationErrors }) {
+      return (
+        <Card>
+          <Title n={8} t="Export a uložení" />
+          <div className="flex flex-wrap gap-4 print-hidden">
+            <button 
+              onClick={saveDraft} 
+              className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+            >
+              💾 Uložit návrh
+            </button>
+            <button 
+              onClick={loadDraft} 
+              className="bg-gray-500 text-white px-4 py-2 rounded hover:bg-gray-600"
+            >
+              📁 Načíst návrh
+            </button>
+            <button 
+              onClick={savePdf} 
+              disabled={!isValid} 
+              className="bg-orange-500 text-white disabled:bg-gray-300 disabled:text-gray-500 px-4 py-2 rounded hover:bg-orange-600 disabled:hover:bg-gray-300"
+              title={!isValid ? "Vyplňte povinná pole" : "Stáhnout jako PDF"}
+            >
+              📄 Uložit PDF
+            </button>
+            <button 
+              onClick={sendMail} 
+              disabled={!isValid} 
+              className="bg-green-600 text-white disabled:bg-gray-300 disabled:text-gray-500 px-4 py-2 rounded hover:bg-green-700 disabled:hover:bg-gray-300"
+              title={!isValid ? "Vyplňte povinná pole" : "Odeslat e-mailem"}
+            >
+              📧 Odeslat e-mail
+            </button>
+          </div>
+          {!isValid && (
+            <div className="mt-4 p-3 bg-red-50 border-l-4 border-red-500 rounded">
+              <p className="text-sm text-red-700 font-medium">Pro export vyplňte následující povinná pole:</p>
+              <ul className="text-sm text-red-600 mt-1 list-disc list-inside">
+                {validationErrors.map((error, i) => (
+                  <li key={i}>{error}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <input ref={draftRef} type="file" accept=".json" onChange={onFileLoad} className="hidden" />
+        </Card>
+      );
+    }
+
+    function App() {
+      const [vinik, setVinik] = useState({ jmeno:'', firma:'', identifikace:'', kontakt:'' });
+      const [udalost, setUdalost] = useState({ 
+        kdy: { datum:'', cas:'' }, 
+        formular: { datum:'', cas:'' }, 
+        misto:'', 
+        popis:'', 
+        pricina:'' 
+      });
+      const [items, setItems] = useState([{ typ:'', popis:'', mnozstvi:'', odhad:'', mena:'CZK' }]);
+      const [photos, setPhotos] = useState([]);
+      const [signatures, setSignatures] = useState({ vinik: null, security: null });
+      const draftRef = useRef();
+      const pdfRef = useRef();
+
+      useEffect(() => {
+        const now = new Date();
+        const formatDate = (date) => date.toISOString().split('T')[0];
+        const formatTime = (date) => {
+          const hours = String(date.getHours()).padStart(2, '0');
+          const minutes = String(date.getMinutes()).padStart(2, '0');
+          return `${hours}:${minutes}`;
+        };
+        
+        setUdalost(u => ({ 
+          ...u, 
+          formular: { 
+            datum: formatDate(now), 
+            cas: formatTime(now) 
+          } 
+        }));
+      }, []);
+
+      const { isValid, errors, validationErrors } = useMemo(() => {
+        const errors = {};
+        const validationErrors = [];
+
+        if (!vinik.jmeno.trim()) {
+          errors.jmeno = 'Jméno viníka je povinné';
+          validationErrors.push('Jméno a příjmení viníka');
+        }
+
+        if (!udalost.kdy?.datum) {
+          errors.datum = 'Datum události je povinné';
+          validationErrors.push('Datum události');
+        }
+
+        if (!udalost.misto) {
+          errors.misto = 'Místo události je povinné';
+          validationErrors.push('Místo události');
+        }
+
+        if (!udalost.popis?.trim()) {
+          errors.popis = 'Popis události je povinný';
+          validationErrors.push('Popis události');
+        }
+
+        const hasValidItem = items.some(item => item.typ);
+        if (!hasValidItem) {
+          errors.items = 'Alespoň jedna položka s typem poškození je povinná';
+          validationErrors.push('Alespoň jeden typ poškozené věci');
+        }
+
+        return {
+          isValid: validationErrors.length === 0,
+          errors,
+          validationErrors
+        };
+      }, [vinik, udalost, items]);
+
+      const saveDraft = () => { 
+        const data = { 
+          vinik, 
+          udalost, 
+          items, 
+          photos: photos.map(p => ({ url: p.url, name: p.name })), 
+          signatures 
+        }; 
+        const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json'}); 
+        const url = URL.createObjectURL(blob); 
+        const a = document.createElement('a'); 
+        a.href = url; 
+        
+        const sanitizedName = vinik.jmeno.replace(/[^a-zA-Z0-9\u00C0-\u017F]/g, '_') || 'bez_jmena';
+        const dateStr = new Date().toISOString().split('T')[0];
+        a.download = `draft_${sanitizedName}_${dateStr}.json`; 
+        
+        a.click(); 
+        URL.revokeObjectURL(url);
+      };
+      
+      const loadDraft = () => draftRef.current.click();
+      
+      const onFileLoad = e => { 
+        const file = e.target.files[0]; 
+        if (!file) return;
+        
+        const reader = new FileReader(); 
+        reader.onload = () => { 
+          try {
+            const data = JSON.parse(reader.result); 
+            if (data.vinik) setVinik(data.vinik); 
+            if (data.udalost) setUdalost(data.udalost); 
+            if (data.items) setItems(data.items); 
+            if (data.signatures) setSignatures(data.signatures);
+            if (data.photos) setPhotos(data.photos); 
+            
+            alert('Návrh byl úspěšně načten!');
+          } catch (error) {
+            alert('Chyba při načítání souboru: ' + error.message);
+          }
+        }; 
+        reader.readAsText(file); 
+      };
+      
+      const savePdf = () => { 
+        window.scrollTo(0, 0); 
+        const element = pdfRef.current; 
+        
+        const sanitizedName = vinik.jmeno.replace(/[^a-zA-Z0-9\u00C0-\u017F]/g, '_') || 'bez_jmena';
+        const dateStr = new Date().toISOString().split('T')[0];
+        
+        const options = { 
+          margin: 0.5, 
+          filename: `skoda_${sanitizedName}_${dateStr}.pdf`, 
+          jsPDF: { unit:'mm', format:'a4', orientation:'portrait' }, 
+          html2canvas: { 
+            scale: 2, 
+            useCORS: true, 
+            allowTaint: true,
+            height: element.scrollHeight,
+            width: element.scrollWidth
+          } 
+        }; 
+        
+        html2pdf().set(options).from(element).save(); 
+      };
+      
+      const sendMail = () => {
+        const subject = encodeURIComponent(`Hlášení škodné události - ${vinik.jmeno || 'Neznámý viník'}`);
+        const totalDamage = items.reduce((acc, item) => {
+          const amount = (Number(item.mnozstvi) || 0) * (Number(item.odhad) || 0);
+          acc[item.mena] = (acc[item.mena] || 0) + amount;
+          return acc;
+        }, {});
+        
+        const damageText = Object.entries(totalDamage)
+          .map(([currency, amount]) => fmtMoney(amount, currency))
+          .join(', ');
+        
+        const body = encodeURIComponent(`Dobrý den,
+
+v příloze zasílám hlášení škodné události.
+
+Základní informace:
+- Viník: ${vinik.jmeno || 'Neuveden'}
+- Firma: ${vinik.firma || 'Neuvedena'}
+- Datum události: ${udalost.kdy?.datum || 'Neuveden'}
+- Místo: ${udalost.misto || 'Neuvedeno'}
+- Celková škoda: ${damageText || 'Nespočítána'}
+
+Popis události:
+${udalost.popis || 'Neuvedeno'}
+
+S pozdravem`);
+        
+        window.open(`mailto:?subject=${subject}&body=${body}`);
+      };
+
+      useEffect(() => {
+        return () => {
+          photos.forEach(photo => {
+            if (photo.url) {
+              URL.revokeObjectURL(photo.url);
+            }
+          });
+        };
+      }, []);
+
+      return (
+        <div className="max-w-4xl mx-auto p-4 space-y-6">
+          <header className="text-center">
+            <h1 className="text-4xl font-bold text-gray-800">Záznam o škodní události</h1>
+            <p className="text-gray-600 mt-2">Vyplňte všechny povinné údaje označené *</p>
+          </header>
+          <main ref={pdfRef} className="space-y-6">
+            <VinikForm vinik={vinik} setVinik={setVinik} errors={errors} />
+            <UdalostForm udalost={udalost} setUdalost={setUdalost} errors={errors} />
+            <ItemsTable items={items} setItems={setItems} errors={errors} />
+            <DescriptionSection udalost={udalost} setUdalost={setUdalost} errors={errors} />
+            <PhotoSection photos={photos} setPhotos={setPhotos} />
+            <SignaturesSection signatures={signatures} setSignatures={setSignatures} />
+            <ExportSection 
+              draftRef={draftRef} 
+              onFileLoad={onFileLoad} 
+              savePdf={savePdf} 
+              sendMail={sendMail} 
+              saveDraft={saveDraft} 
+              loadDraft={loadDraft} 
+              isValid={isValid} 
+              validationErrors={validationErrors}
+            />
+          </main>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
