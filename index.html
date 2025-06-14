@@ -12,10 +12,18 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/signature_pad@4.0.0/dist/signature_pad.umd.min.js"></script>
   <style>
+    .page-break { page-break-before: always; break-before: page; display: block; }
+
     @page { size: A4 portrait; margin: 10mm; }
     @media print {
       .print-hidden { display: none !important; }
       .avoid-break { break-inside: avoid; page-break-inside: avoid; }
+      .page-break { break-before: page; page-break-before: always; }
+    }
+    .signature-canvas {
+      touch-action: none;
+      border: 2px solid #d1d5db;
+      border-radius: 8px;
     }
   </style>
 </head>
@@ -27,7 +35,11 @@
     const OPTIONS = ['Regál stojina','Regál nosník','Regál police','VZV','Elektroinstalace','Zeď','Vrata','Dopravník','Klec','Zboží','Ostatní'];
     const fmtMoney = (v,c) => new Intl.NumberFormat('cs-CZ',{style:'currency',currency:c}).format(v);
 
-    const Card = ({ children }) => <div className="bg-white rounded-2xl shadow p-6 space-y-4 avoid-break">{children}</div>;
+    const Card = ({ children, className = "" }) => (
+      <div className={`bg-white rounded-2xl shadow p-6 space-y-4 avoid-break \${className}`}>
+        {children}
+      </div>
+    );
     const Title = ({ n, t }) => <h2 className="text-2xl font-semibold mb-4 border-b pb-2">{n}. {t}</h2>;
     const Input = forwardRef(({ label, error, ...props }, ref) => (
       <div>
@@ -125,6 +137,7 @@
         setItems(it => it.map((r,idx) => {
           if (idx === i) {
             const updatedItem = { ...r, [f]: value };
+            // Automaticky spočítej celkovou částku při změně množství nebo ceny
             if (f === 'mnozstvi' || f === 'odhad') {
               const mnozstvi = f === 'mnozstvi' ? Number(value) || 0 : Number(r.mnozstvi) || 0;
               const cena = f === 'odhad' ? Number(value) || 0 : Number(r.odhad) || 0;
@@ -218,7 +231,7 @@
               + Přidat položku
             </button>
             <div className="text-right font-semibold">
-              <div className="text-sm text-gray-600 mb-1">Celková škoda:</div>
+              <div className="text-sm text-gray-600 mb-1">Celková škoda (bez DPH):</div>
               {Object.entries(totals).map(([currency, sum]) => (
                 <div key={currency} className="text-lg">
                   {fmtMoney(sum, currency)}
@@ -227,13 +240,14 @@
             </div>
           </div>
         </Card>
+
       );
     }
 
     function DescriptionSection({ udalost, setUdalost, errors }) {
       const handle = f => e => setUdalost(u => ({ ...u, [f]: e.target.value }));
       return (
-        <Card>
+        <Card className="page-break">
           <Title n={4} t="Popis události" />
           <TextArea 
             value={udalost.popis || ''} 
@@ -258,11 +272,13 @@
       const add = e => {
         const files = Array.from(e.target.files);
         
+        // Kontrola počtu fotek
         if (photos.length + files.length > MAX_PHOTOS) {
           alert(`Můžete nahrát maximálně ${MAX_PHOTOS} fotografií.`);
           return;
         }
 
+        // Kontrola velikosti souborů
         const oversizedFiles = files.filter(f => f.size > MAX_FILE_SIZE);
         if (oversizedFiles.length > 0) {
           alert('Některé soubory jsou příliš velké. Maximální velikost je 5MB.');
@@ -276,6 +292,7 @@
         }));
         setPhotos(ps => [...ps, ...newPhotos]);
         
+        // Resetuj input
         e.target.value = '';
       };
       
@@ -336,28 +353,82 @@
     function SignaturesSection({ signatures, setSignatures }) {
       const canvasRefs = useRef({});
       const signaturePads = useRef({});
+      const containerRefs = useRef({});
+
+      const resizeCanvas = (canvas, container) => {
+        const containerWidth = container.offsetWidth;
+        const containerHeight = 200; // Fixed height
+        
+        // Set display size
+        canvas.style.width = containerWidth + 'px';
+        canvas.style.height = containerHeight + 'px';
+        
+        // Set actual size in pixels
+        canvas.width = containerWidth;
+        canvas.height = containerHeight;
+        
+        // Scale context to ensure correct drawing
+        const context = canvas.getContext('2d');
+        context.scale(1, 1);
+      };
+
+      const initializeSignaturePad = (role) => {
+        if (canvasRefs.current[role] && containerRefs.current[role] && !signaturePads.current[role]) {
+          const canvas = canvasRefs.current[role];
+          const container = containerRefs.current[role];
+          
+          // Resize canvas to fit container
+          resizeCanvas(canvas, container);
+          
+          // Initialize signature pad
+          signaturePads.current[role] = new SignaturePad(canvas, {
+            backgroundColor: 'rgba(255, 255, 255, 1)',
+            penColor: 'rgb(0, 0, 0)',
+            minWidth: 1,
+            maxWidth: 3,
+            throttle: 0,
+            minDistance: 0
+          });
+          
+          // Handle signature changes
+          signaturePads.current[role].addEventListener('endStroke', () => {
+            const dataURL = signaturePads.current[role].toDataURL('image/png');
+            setSignatures(prev => ({ ...prev, [role]: dataURL }));
+          });
+
+          // Handle window resize
+          const handleResize = () => {
+            if (signaturePads.current[role] && containerRefs.current[role]) {
+              const signatureData = signaturePads.current[role].toData();
+              resizeCanvas(canvas, container);
+              signaturePads.current[role].clear();
+              signaturePads.current[role].fromData(signatureData);
+            }
+          };
+
+          window.addEventListener('resize', handleResize);
+          
+          // Store cleanup function
+          signaturePads.current[role]._cleanup = () => {
+            window.removeEventListener('resize', handleResize);
+          };
+        }
+      };
 
       useEffect(() => {
-        ['vinik', 'security'].forEach(role => {
-          if (canvasRefs.current[role] && !signaturePads.current[role]) {
-            signaturePads.current[role] = new SignaturePad(canvasRefs.current[role], {
-              backgroundColor: 'rgba(255, 255, 255, 0)',
-              penColor: 'rgb(0, 0, 0)',
-              minWidth: 1,
-              maxWidth: 2
-            });
-            
-            signaturePads.current[role].addEventListener('endStroke', () => {
-              const dataURL = signaturePads.current[role].toDataURL();
-              setSignatures(prev => ({ ...prev, [role]: dataURL }));
-            });
-          }
-        });
+        // Initialize signature pads with a small delay to ensure DOM is ready
+        const timer = setTimeout(() => {
+          ['vinik', 'security'].forEach(role => {
+            initializeSignaturePad(role);
+          });
+        }, 100);
 
         return () => {
+          clearTimeout(timer);
+          // Cleanup
           Object.values(signaturePads.current).forEach(pad => {
-            if (pad && pad.off) {
-              pad.off();
+            if (pad && pad._cleanup) {
+              pad._cleanup();
             }
           });
         };
@@ -378,24 +449,34 @@
               {key: 'vinik', label: 'Viník'}, 
               {key: 'security', label: 'Security'}
             ].map(({key, label}) => (
-              <div key={key}>
-                <div className="flex justify-between items-center mb-2">
-                  <p className="font-semibold">Podpis {label}</p>
+              <div key={key} className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <p className="font-semibold text-gray-800">Podpis {label}</p>
                   <button 
                     onClick={() => clearSignature(key)} 
-                    className="text-sm bg-gray-200 px-2 py-1 rounded hover:bg-gray-300"
+                    className="text-sm bg-gray-200 px-3 py-1 rounded hover:bg-gray-300 transition-colors"
                   >
                     Vymazat
                   </button>
                 </div>
-                <canvas 
-                  ref={el => canvasRefs.current[key] = el}
-                  width="300"
-                  height="160"
-                  className="border w-full h-40 bg-white rounded cursor-crosshair" 
-                />
-                <p className="text-xs text-gray-500 mt-1">
-                  Podepište se myší nebo prstem na dotykové obrazovce
+                <div 
+                  ref={el => containerRefs.current[key] = el}
+                  className="w-full bg-white rounded-lg shadow-inner"
+                  style={{ height: '200px' }}
+                >
+                  <canvas 
+                    ref={el => canvasRefs.current[key] = el}
+                    className="signature-canvas w-full h-full cursor-crosshair"
+                    style={{ 
+                      touchAction: 'none',
+                      userSelect: 'none',
+                      WebkitUserSelect: 'none',
+                      MozUserSelect: 'none'
+                    }}
+                  />
+                </div>
+                <p className="text-xs text-gray-500">
+                  Podepište se myší nebo prstem na dotykové obrazovce. Canvas se automaticky přizpůsobí velikosti.
                 </p>
               </div>
             ))}
@@ -468,9 +549,15 @@
       const draftRef = useRef();
       const pdfRef = useRef();
 
+      // Nastavení aktuálního data a času při načtení
       useEffect(() => {
         const now = new Date();
-        const formatDate = (date) => date.toISOString().split('T')[0];
+        const formatDate = (date) => {
+  const d = String(date.getDate()).padStart(2, '0');
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const y = date.getFullYear();
+  return `${d}. ${m}. ${y}`;
+};
         const formatTime = (date) => {
           const hours = String(date.getHours()).padStart(2, '0');
           const minutes = String(date.getMinutes()).padStart(2, '0');
@@ -486,6 +573,7 @@
         }));
       }, []);
 
+      // Validace formuláře
       const { isValid, errors, validationErrors } = useMemo(() => {
         const errors = {};
         const validationErrors = [];
@@ -585,7 +673,8 @@
             allowTaint: true,
             height: element.scrollHeight,
             width: element.scrollWidth
-          } 
+          },
+          pagebreak: { mode: ['css','legacy'], before: '.page-break' } 
         }; 
         
         html2pdf().set(options).from(element).save(); 
@@ -612,7 +701,7 @@ Základní informace:
 - Firma: ${vinik.firma || 'Neuvedena'}
 - Datum události: ${udalost.kdy?.datum || 'Neuveden'}
 - Místo: ${udalost.misto || 'Neuvedeno'}
-- Celková škoda: ${damageText || 'Nespočítána'}
+- Celková škoda (bez DPH): ${damageText || 'Nespočítána'}
 
 Popis události:
 ${udalost.popis || 'Neuvedeno'}
@@ -622,6 +711,7 @@ S pozdravem`);
         window.open(`mailto:?subject=${subject}&body=${body}`);
       };
 
+      // Cleanup URLs při unmount
       useEffect(() => {
         return () => {
           photos.forEach(photo => {
